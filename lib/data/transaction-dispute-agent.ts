@@ -1,0 +1,449 @@
+import { Agent, SubAgent, Rule, Policy, Tool } from '../types'
+
+// Sub-agent 1: Find Transaction
+const findTransactionTools: Tool[] = [
+  {
+    id: 'tool-search-recent',
+    name: 'search_recent_transactions',
+    type: 'lookup',
+    description: 'Search customer transactions from the last 90 days',
+    parameters: [
+      { name: 'customer_id', type: 'string', description: 'Customer identifier', required: true },
+      { name: 'date_range', type: 'string', description: 'Date range (e.g., "last_30_days")', required: false },
+      { name: 'amount_min', type: 'number', description: 'Minimum transaction amount', required: false },
+      { name: 'amount_max', type: 'number', description: 'Maximum transaction amount', required: false },
+    ],
+  },
+  {
+    id: 'tool-search-by-id',
+    name: 'search_transaction_by_id',
+    type: 'lookup',
+    description: 'Look up a specific transaction by its ID',
+    parameters: [
+      { name: 'transaction_id', type: 'string', description: 'Transaction identifier', required: true },
+    ],
+  },
+  {
+    id: 'tool-get-details',
+    name: 'get_transaction_details',
+    type: 'lookup',
+    description: 'Get full details including merchant info, category, and timestamps',
+    parameters: [
+      { name: 'transaction_id', type: 'string', description: 'Transaction identifier', required: true },
+    ],
+    prerequisites: ['tool-search-recent', 'tool-search-by-id'],
+  },
+]
+
+const findTransactionSubAgent: SubAgent = {
+  id: 'sub-find-transaction',
+  name: 'Find Transaction',
+  objective: 'Help the customer identify the specific transaction they want to dispute by searching their recent transaction history and confirming the correct charge.',
+  workflow: [
+    { id: 'step-1', description: 'Ask customer about the transaction (date, amount, merchant)', order: 1 },
+    { id: 'step-2', description: 'Search transactions matching their description', order: 2 },
+    { id: 'step-3', description: 'Present matching transactions for confirmation', order: 3 },
+    { id: 'step-4', description: 'Get transaction details once identified', order: 4 },
+  ],
+  tools: findTransactionTools,
+  rules: [
+    {
+      id: 'rule-ft-1',
+      name: 'Clarify vague descriptions',
+      description: 'If the customer provides vague transaction details, ask clarifying questions about the approximate date, amount range, or merchant category.',
+      scope: 'conditional',
+      condition: 'customer_description_is_vague',
+    },
+    {
+      id: 'rule-ft-2',
+      name: 'Show recent transactions',
+      description: 'If the customer cannot recall details, offer to show their most recent transactions to help identify the charge.',
+      scope: 'conditional',
+      condition: 'customer_cannot_recall_details',
+    },
+  ],
+  policies: [
+    {
+      id: 'policy-ft-1',
+      name: 'Transaction age limit',
+      description: 'Only transactions from the last 120 days are eligible for dispute. Inform customers about this limitation upfront.',
+      enforcement: 'strict',
+    },
+  ],
+  outcomes: [
+    {
+      id: 'outcome-ft-recognized',
+      name: 'Recognized charge',
+      description: 'Customer recognizes the charge after reviewing details',
+      condition: { type: 'observation', expression: 'customer confirms they recognize the transaction' },
+    },
+    {
+      id: 'outcome-ft-fraud',
+      name: 'Suspected fraud',
+      description: 'Customer does not recognize the charge at all - potential fraud',
+      condition: { type: 'observation', expression: 'customer states they did not make this transaction' },
+      nextSubAgentId: 'sub-understand-dispute',
+    },
+    {
+      id: 'outcome-ft-merchant',
+      name: 'Merchant dispute',
+      description: 'Customer recognizes merchant but disputes the amount or service',
+      condition: { type: 'observation', expression: 'customer recognizes merchant but has issue with charge' },
+      nextSubAgentId: 'sub-understand-dispute',
+    },
+  ],
+}
+
+// Sub-agent 2: Understand Dispute
+const understandDisputeTools: Tool[] = [
+  {
+    id: 'tool-classify-dispute',
+    name: 'classify_dispute_type',
+    type: 'lookup',
+    description: 'Classify the dispute into categories: fraud, billing error, quality issue, or service not received',
+    parameters: [
+      { name: 'transaction_id', type: 'string', description: 'Transaction identifier', required: true },
+      { name: 'customer_statement', type: 'string', description: 'Customer description of the issue', required: true },
+    ],
+  },
+  {
+    id: 'tool-check-eligibility',
+    name: 'check_dispute_eligibility',
+    type: 'lookup',
+    description: 'Check if the transaction is eligible for dispute based on type, age, and previous disputes',
+    parameters: [
+      { name: 'transaction_id', type: 'string', description: 'Transaction identifier', required: true },
+      { name: 'dispute_type', type: 'string', description: 'Type of dispute', required: true },
+    ],
+  },
+  {
+    id: 'tool-merchant-contact',
+    name: 'get_merchant_contact_info',
+    type: 'lookup',
+    description: 'Retrieve merchant contact information for customer to attempt resolution',
+    parameters: [
+      { name: 'merchant_id', type: 'string', description: 'Merchant identifier', required: true },
+    ],
+  },
+]
+
+const understandDisputeSubAgent: SubAgent = {
+  id: 'sub-understand-dispute',
+  name: 'Understand Dispute',
+  objective: 'Classify the type of dispute and gather relevant context to determine the appropriate resolution path.',
+  workflow: [
+    { id: 'step-ud-1', description: 'Ask customer to describe what went wrong', order: 1 },
+    { id: 'step-ud-2', description: 'Classify the dispute type', order: 2 },
+    { id: 'step-ud-3', description: 'Check dispute eligibility', order: 3 },
+    { id: 'step-ud-4', description: 'Determine if merchant contact is recommended first', order: 4 },
+  ],
+  tools: understandDisputeTools,
+  rules: [
+    {
+      id: 'rule-ud-1',
+      name: 'Gather complete context',
+      description: 'Before classifying, ensure you have: what happened, when the customer noticed, any communication with merchant.',
+      scope: 'always',
+    },
+    {
+      id: 'rule-ud-2',
+      name: 'Empathize with frustration',
+      description: 'Acknowledge customer frustration and assure them we will help resolve the issue.',
+      scope: 'always',
+    },
+  ],
+  policies: [
+    {
+      id: 'policy-ud-1',
+      name: 'Merchant first for non-fraud',
+      description: 'For non-fraud disputes, recommend customer contact merchant first unless they have already attempted.',
+      enforcement: 'advisory',
+    },
+    {
+      id: 'policy-ud-2',
+      name: 'Fraud escalation',
+      description: 'Suspected fraud cases must be flagged for immediate card replacement consideration.',
+      enforcement: 'strict',
+    },
+  ],
+  outcomes: [
+    {
+      id: 'outcome-ud-merchant',
+      name: 'Try merchant first',
+      description: 'Non-fraud dispute where merchant contact is recommended',
+      condition: { type: 'fact', expression: 'dispute_type != "fraud" AND merchant_contact_not_attempted' },
+    },
+    {
+      id: 'outcome-ud-proceed',
+      name: 'Proceed to dispute',
+      description: 'Dispute is eligible and ready to file',
+      condition: { type: 'fact', expression: 'dispute_eligible == true' },
+      nextSubAgentId: 'sub-create-dispute',
+    },
+  ],
+}
+
+// Sub-agent 3: Create Dispute
+const createDisputeTools: Tool[] = [
+  {
+    id: 'tool-create-dispute',
+    name: 'create_dispute',
+    type: 'action',
+    description: 'Submit a formal dispute for the transaction',
+    parameters: [
+      { name: 'transaction_id', type: 'string', description: 'Transaction identifier', required: true },
+      { name: 'dispute_type', type: 'string', description: 'Type of dispute', required: true },
+      { name: 'customer_statement', type: 'string', description: 'Customer description of issue', required: true },
+      { name: 'requested_amount', type: 'number', description: 'Amount to dispute (can be partial)', required: true },
+    ],
+  },
+  {
+    id: 'tool-upload-doc',
+    name: 'upload_dispute_document',
+    type: 'action',
+    description: 'Upload supporting documentation for the dispute',
+    parameters: [
+      { name: 'dispute_id', type: 'string', description: 'Dispute case identifier', required: true },
+      { name: 'document_type', type: 'string', description: 'Type of document (receipt, email, photo)', required: true },
+      { name: 'document_url', type: 'string', description: 'URL or reference to document', required: true },
+    ],
+    prerequisites: ['tool-create-dispute'],
+  },
+  {
+    id: 'tool-provisional-credit',
+    name: 'issue_provisional_credit',
+    type: 'action',
+    description: 'Issue provisional credit while dispute is being investigated',
+    parameters: [
+      { name: 'dispute_id', type: 'string', description: 'Dispute case identifier', required: true },
+      { name: 'amount', type: 'number', description: 'Credit amount', required: true },
+    ],
+    prerequisites: ['tool-create-dispute'],
+  },
+]
+
+const createDisputeSubAgent: SubAgent = {
+  id: 'sub-create-dispute',
+  name: 'Create Dispute',
+  objective: 'Collect all necessary information and documentation to formally submit the dispute case.',
+  workflow: [
+    { id: 'step-cd-1', description: 'Confirm dispute details with customer', order: 1 },
+    { id: 'step-cd-2', description: 'Collect customer statement', order: 2 },
+    { id: 'step-cd-3', description: 'Request supporting documentation if available', order: 3 },
+    { id: 'step-cd-4', description: 'Submit dispute', order: 4 },
+    { id: 'step-cd-5', description: 'Offer provisional credit if eligible', order: 5 },
+    { id: 'step-cd-6', description: 'Provide dispute reference number and next steps', order: 6 },
+  ],
+  tools: createDisputeTools,
+  rules: [
+    {
+      id: 'rule-cd-1',
+      name: 'Confirm before submitting',
+      description: 'Always read back the dispute details and get explicit confirmation before submitting.',
+      scope: 'always',
+    },
+    {
+      id: 'rule-cd-2',
+      name: 'Encourage documentation',
+      description: 'Inform customer that supporting documents can strengthen their case, but are not always required.',
+      scope: 'always',
+    },
+  ],
+  policies: [
+    {
+      id: 'policy-cd-1',
+      name: 'Provisional credit eligibility',
+      description: 'Provisional credit is available for disputes over $25 with good account standing.',
+      enforcement: 'strict',
+    },
+    {
+      id: 'policy-cd-2',
+      name: 'Documentation retention',
+      description: 'All uploaded documents must be retained for 7 years per regulatory requirements.',
+      enforcement: 'strict',
+    },
+  ],
+  outcomes: [
+    {
+      id: 'outcome-cd-submitted',
+      name: 'Dispute submitted',
+      description: 'Dispute successfully created and customer informed of next steps',
+      condition: { type: 'fact', expression: 'dispute_created == true' },
+      nextSubAgentId: 'sub-track-resolve',
+    },
+  ],
+}
+
+// Sub-agent 4: Track & Resolve
+const trackResolveTools: Tool[] = [
+  {
+    id: 'tool-get-status',
+    name: 'get_dispute_status',
+    type: 'lookup',
+    description: 'Get current status of a dispute case',
+    parameters: [
+      { name: 'dispute_id', type: 'string', description: 'Dispute case identifier', required: true },
+    ],
+  },
+  {
+    id: 'tool-get-timeline',
+    name: 'get_dispute_timeline',
+    type: 'lookup',
+    description: 'Get timeline of events and expected resolution date',
+    parameters: [
+      { name: 'dispute_id', type: 'string', description: 'Dispute case identifier', required: true },
+    ],
+  },
+  {
+    id: 'tool-upload-evidence',
+    name: 'upload_additional_evidence',
+    type: 'action',
+    description: 'Add additional evidence to an existing dispute',
+    parameters: [
+      { name: 'dispute_id', type: 'string', description: 'Dispute case identifier', required: true },
+      { name: 'evidence_type', type: 'string', description: 'Type of evidence', required: true },
+      { name: 'evidence_url', type: 'string', description: 'URL or reference to evidence', required: true },
+    ],
+  },
+]
+
+const trackResolveSubAgent: SubAgent = {
+  id: 'sub-track-resolve',
+  name: 'Track & Resolve',
+  objective: 'Help customers track their dispute status and provide resolution outcomes.',
+  workflow: [
+    { id: 'step-tr-1', description: 'Retrieve current dispute status', order: 1 },
+    { id: 'step-tr-2', description: 'Explain status and timeline to customer', order: 2 },
+    { id: 'step-tr-3', description: 'Handle any additional information requests', order: 3 },
+    { id: 'step-tr-4', description: 'Communicate final resolution', order: 4 },
+  ],
+  tools: trackResolveTools,
+  rules: [
+    {
+      id: 'rule-tr-1',
+      name: 'Proactive updates',
+      description: 'Inform customers they will receive email updates at each stage of the process.',
+      scope: 'always',
+    },
+    {
+      id: 'rule-tr-2',
+      name: 'Explain denial reasons',
+      description: 'If a dispute is denied, clearly explain the reason and any appeal options.',
+      scope: 'conditional',
+      condition: 'dispute_status == "denied"',
+    },
+  ],
+  policies: [
+    {
+      id: 'policy-tr-1',
+      name: 'Resolution timeline',
+      description: 'Most disputes are resolved within 10 business days. Complex cases may take up to 45 days.',
+      enforcement: 'advisory',
+    },
+    {
+      id: 'policy-tr-2',
+      name: 'Appeal window',
+      description: 'Customers have 30 days to appeal a denied dispute with new evidence.',
+      enforcement: 'strict',
+    },
+  ],
+  outcomes: [
+    {
+      id: 'outcome-tr-investigating',
+      name: 'Under investigation',
+      description: 'Dispute is being actively investigated',
+      condition: { type: 'fact', expression: 'dispute_status == "investigating"' },
+    },
+    {
+      id: 'outcome-tr-pending',
+      name: 'Pending information',
+      description: 'Additional information needed from customer',
+      condition: { type: 'fact', expression: 'dispute_status == "pending_info"' },
+    },
+    {
+      id: 'outcome-tr-approved',
+      name: 'Dispute approved',
+      description: 'Dispute resolved in customer favor',
+      condition: { type: 'fact', expression: 'dispute_status == "approved"' },
+    },
+    {
+      id: 'outcome-tr-denied',
+      name: 'Dispute denied',
+      description: 'Dispute resolved against customer',
+      condition: { type: 'fact', expression: 'dispute_status == "denied"' },
+    },
+  ],
+}
+
+// Global rules
+const globalRules: Rule[] = [
+  {
+    id: 'global-rule-1',
+    name: 'Identity verification',
+    description: 'Verify customer identity before accessing account information or making changes.',
+    scope: 'always',
+  },
+  {
+    id: 'global-rule-2',
+    name: 'Clear communication',
+    description: 'Use clear, jargon-free language. Explain banking terms when necessary.',
+    scope: 'always',
+  },
+  {
+    id: 'global-rule-3',
+    name: 'Escalation path',
+    description: 'Offer to connect customer with a human agent if they express frustration or the issue is too complex.',
+    scope: 'conditional',
+    condition: 'customer_requests_human OR complexity_high',
+  },
+]
+
+// Global policies
+const globalPolicies: Policy[] = [
+  {
+    id: 'global-policy-1',
+    name: 'Data privacy',
+    description: 'Never expose full account numbers, SSN, or other sensitive PII in responses.',
+    enforcement: 'strict',
+  },
+  {
+    id: 'global-policy-2',
+    name: 'Regulatory compliance',
+    description: 'All dispute handling must comply with Regulation E and Regulation Z requirements.',
+    enforcement: 'strict',
+  },
+  {
+    id: 'global-policy-3',
+    name: 'Service hours disclosure',
+    description: 'Inform customers that human support is available 24/7 for urgent matters.',
+    enforcement: 'advisory',
+  },
+]
+
+// Complete agent configuration
+export const transactionDisputeAgent: Agent = {
+  id: 'agent-transaction-dispute',
+  name: 'Transaction Dispute Agent',
+  description: 'Assists JP Morgan Chase customers with disputing transactions, from identification through resolution.',
+  globalRules,
+  globalPolicies,
+  glossary: [
+    { term: 'Provisional Credit', definition: 'Temporary credit issued to customer account while dispute is investigated' },
+    { term: 'Chargeback', definition: 'Reversal of a credit card transaction, returning funds to the cardholder' },
+    { term: 'Dispute', definition: 'Formal claim that a transaction was unauthorized, incorrect, or unsatisfactory' },
+    { term: 'Merchant', definition: 'Business or seller that processed the original transaction' },
+    { term: 'Regulation E', definition: 'Federal regulation governing electronic fund transfers and consumer rights' },
+    { term: 'Regulation Z', definition: 'Federal regulation implementing the Truth in Lending Act for credit transactions' },
+  ],
+  responseStyle: {
+    tone: 'professional',
+    verbosity: 'balanced',
+  },
+  subAgents: [
+    findTransactionSubAgent,
+    understandDisputeSubAgent,
+    createDisputeSubAgent,
+    trackResolveSubAgent,
+  ],
+  rootSubAgentId: 'sub-find-transaction',
+}
