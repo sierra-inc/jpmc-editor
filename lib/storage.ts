@@ -17,57 +17,59 @@ function isVercelBlobConfigured(): boolean {
 // ============== Vercel Blob Storage ==============
 
 async function getBlobAgents(): Promise<Agent[]> {
-  const { list, head } = await import('@vercel/blob')
+  const { list } = await import('@vercel/blob')
   
   try {
     // Check if the blob exists
     const { blobs } = await list({ prefix: BLOB_AGENTS_KEY })
     const agentBlob = blobs.find(b => b.pathname === BLOB_AGENTS_KEY)
     
+    console.log('[Blob] List result:', blobs.map(b => b.pathname))
+    
     if (!agentBlob) {
+      console.log('[Blob] No existing blob found, initializing with seed data')
       // Initialize with seed data
       await saveBlobAgents([transactionDisputeAgent])
       return [transactionDisputeAgent]
     }
     
-    // Fetch the blob content
-    const response = await fetch(agentBlob.url, { 
+    console.log('[Blob] Fetching from:', agentBlob.url)
+    
+    // Fetch the blob content with cache busting
+    const response = await fetch(`${agentBlob.url}?t=${Date.now()}`, { 
       cache: 'no-store',
-      headers: { 'Cache-Control': 'no-cache' }
     })
     
     if (!response.ok) {
-      console.error('Failed to fetch blob:', response.statusText)
+      console.error('[Blob] Failed to fetch:', response.status, response.statusText)
       return [transactionDisputeAgent]
     }
     
     const data = await response.json()
+    console.log('[Blob] Loaded agents count:', Array.isArray(data) ? data.length : 'not array')
     return Array.isArray(data) && data.length > 0 ? data : [transactionDisputeAgent]
   } catch (error) {
-    console.error('Error reading from Vercel Blob:', error)
+    console.error('[Blob] Error reading:', error)
     return [transactionDisputeAgent]
   }
 }
 
 async function saveBlobAgents(agents: Agent[]): Promise<void> {
-  const { put, del, list } = await import('@vercel/blob')
+  const { put } = await import('@vercel/blob')
   
   try {
-    // Delete existing blob if it exists (to ensure fresh upload)
-    const { blobs } = await list({ prefix: BLOB_AGENTS_KEY })
-    const existingBlob = blobs.find(b => b.pathname === BLOB_AGENTS_KEY)
-    if (existingBlob) {
-      await del(existingBlob.url)
-    }
+    console.log('[Blob] Saving agents, count:', agents.length)
     
-    // Upload new content
-    await put(BLOB_AGENTS_KEY, JSON.stringify(agents, null, 2), {
+    // Upload new content (overwrites existing)
+    const result = await put(BLOB_AGENTS_KEY, JSON.stringify(agents, null, 2), {
       access: 'public',
       contentType: 'application/json',
       addRandomSuffix: false,
     })
+    
+    console.log('[Blob] Saved successfully to:', result.url)
   } catch (error) {
-    console.error('Error saving to Vercel Blob:', error)
+    console.error('[Blob] Error saving:', error)
     throw error
   }
 }

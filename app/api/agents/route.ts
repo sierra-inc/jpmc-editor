@@ -26,9 +26,16 @@ export async function POST(request: Request) {
   try {
     const agent: Agent = await request.json()
     await saveAgent(agent)
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ 
+      success: true,
+      blobConfigured: !!process.env.BLOB_READ_WRITE_TOKEN,
+    })
   } catch (error) {
     console.error('Error saving agent:', error)
-    return NextResponse.json({ error: 'Failed to save agent' }, { status: 500 })
+    return NextResponse.json({ 
+      error: 'Failed to save agent',
+      details: error instanceof Error ? error.message : String(error),
+      blobConfigured: !!process.env.BLOB_READ_WRITE_TOKEN,
+    }, { status: 500 })
   }
 }
