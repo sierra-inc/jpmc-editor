@@ -20,7 +20,7 @@ export default function Home() {
   useEffect(() => {
     async function loadAgent() {
       try {
-        const res = await fetch('/api/agents')
+        const res = await fetch('/api/agents', { cache: 'no-store' })
         if (res.ok) {
           const agents = await res.json()
           if (agents.length > 0) {

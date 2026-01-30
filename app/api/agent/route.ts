@@ -3,6 +3,10 @@ import yaml from 'js-yaml'
 import { getAgents } from '@/lib/storage'
 import { Agent, SubAgent, Tool, Rule, Policy, Outcome } from '@/lib/types'
 
+// Disable caching for this route - always fetch fresh data
+export const dynamic = 'force-dynamic'
+export const revalidate = 0
+
 function toolToYaml(tool: Tool) {
   const yamlTool: Record<string, unknown> = {
     name: tool.name,
@@ -162,7 +166,12 @@ export async function GET() {
 
     return new NextResponse(yamlOutput, {
       status: 200,
-      headers: { 'Content-Type': 'text/yaml' },
+      headers: { 
+        'Content-Type': 'text/yaml',
+        'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0',
+      },
     })
   } catch (error) {
     console.error('Error generating YAML:', error)

@@ -7,6 +7,72 @@ import { transactionDisputeAgent } from './data/transaction-dispute-agent'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json')
+const BLOB_AGENTS_KEY = 'agents.json'
+
+// Check if we're running on Vercel with Blob configured
+function isVercelBlobConfigured(): boolean {
+  return !!process.env.BLOB_READ_WRITE_TOKEN
+}
+
+// ============== Vercel Blob Storage ==============
+
+async function getBlobAgents(): Promise<Agent[]> {
+  const { list, head } = await import('@vercel/blob')
+  
+  try {
+    // Check if the blob exists
+    const { blobs } = await list({ prefix: BLOB_AGENTS_KEY })
+    const agentBlob = blobs.find(b => b.pathname === BLOB_AGENTS_KEY)
+    
+    if (!agentBlob) {
+      // Initialize with seed data
+      await saveBlobAgents([transactionDisputeAgent])
+      return [transactionDisputeAgent]
+    }
+    
+    // Fetch the blob content
+    const response = await fetch(agentBlob.url, { 
+      cache: 'no-store',
+      headers: { 'Cache-Control': 'no-cache' }
+    })
+    
+    if (!response.ok) {
+      console.error('Failed to fetch blob:', response.statusText)
+      return [transactionDisputeAgent]
+    }
+    
+    const data = await response.json()
+    return Array.isArray(data) && data.length > 0 ? data : [transactionDisputeAgent]
+  } catch (error) {
+    console.error('Error reading from Vercel Blob:', error)
+    return [transactionDisputeAgent]
+  }
+}
+
+async function saveBlobAgents(agents: Agent[]): Promise<void> {
+  const { put, del, list } = await import('@vercel/blob')
+  
+  try {
+    // Delete existing blob if it exists (to ensure fresh upload)
+    const { blobs } = await list({ prefix: BLOB_AGENTS_KEY })
+    const existingBlob = blobs.find(b => b.pathname === BLOB_AGENTS_KEY)
+    if (existingBlob) {
+      await del(existingBlob.url)
+    }
+    
+    // Upload new content
+    await put(BLOB_AGENTS_KEY, JSON.stringify(agents, null, 2), {
+      access: 'public',
+      contentType: 'application/json',
+      addRandomSuffix: false,
+    })
+  } catch (error) {
+    console.error('Error saving to Vercel Blob:', error)
+    throw error
+  }
+}
+
+// ============== Local File System Storage ==============
 
 async function ensureDataDir() {
   try {
@@ -33,10 +99,24 @@ async function ensureAgentsFile() {
   }
 }
 
-export async function getAgents(): Promise<Agent[]> {
+async function getFileAgents(): Promise<Agent[]> {
   await ensureAgentsFile()
   const data = await fs.readFile(AGENTS_FILE, 'utf-8')
   return JSON.parse(data)
+}
+
+async function saveFileAgents(agents: Agent[]): Promise<void> {
+  await ensureDataDir()
+  await fs.writeFile(AGENTS_FILE, JSON.stringify(agents, null, 2))
+}
+
+// ============== Public API ==============
+
+export async function getAgents(): Promise<Agent[]> {
+  if (isVercelBlobConfigured()) {
+    return getBlobAgents()
+  }
+  return getFileAgents()
 }
 
 export async function getAgent(id: string): Promise<Agent | null> {
@@ -54,11 +134,20 @@ export async function saveAgent(agent: Agent): Promise<void> {
     agents.push(agent)
   }
 
-  await fs.writeFile(AGENTS_FILE, JSON.stringify(agents, null, 2))
+  if (isVercelBlobConfigured()) {
+    await saveBlobAgents(agents)
+  } else {
+    await saveFileAgents(agents)
+  }
 }
 
 export async function deleteAgent(id: string): Promise<void> {
   const agents = await getAgents()
   const filtered = agents.filter(a => a.id !== id)
-  await fs.writeFile(AGENTS_FILE, JSON.stringify(filtered, null, 2))
+  
+  if (isVercelBlobConfigured()) {
+    await saveBlobAgents(filtered)
+  } else {
+    await saveFileAgents(filtered)
+  }
 }
